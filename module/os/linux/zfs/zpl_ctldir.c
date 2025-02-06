@@ -190,8 +190,7 @@ zpl_snapdir_automount(struct path *path)
  * the snapshot being immediately unmounted.
  */
 static int
-zpl_snapdir_revalidate(struct inode *dip, const struct qstr *qstr,
-		       struct dentry *dentry, unsigned int flags)
+zpl_snapdir_revalidate(struct dentry *dentry, unsigned int flags)
 {
 	return (!!dentry->d_inode);
 }
