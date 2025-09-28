@@ -22,6 +22,7 @@
 /*
  * Copyright (c) 2011, Lawrence Livermore National Security, LLC.
  * Copyright (c) 2023, Datto Inc. All rights reserved.
+ * Copyright (c) 2025, Rob Norris <robn@despairlabs.com>
  */
 
 
@@ -32,6 +33,7 @@
 #include <sys/zpl.h>
 #include <linux/iversion.h>
 #include <linux/version.h>
+#include <linux/vfs_compat.h>
 
 
 static struct inode *
