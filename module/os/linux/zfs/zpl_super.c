@@ -504,6 +504,146 @@ zpl_prune_sb(uint64_t nr_to_scan, void *arg)
 #endif
 }
 
+static int
+zpl_parse_monolithic(struct fs_context *fc, void *data)
+{
+	if (data == NULL)
+		return (0);
+
+	/*
+	 * Because we supply a .parse_monolithic callback, the kernel does
+	 * no consideration of the options blob at all. Because of this, we
+	 * have to give LSMs a first look at it. They will remove any options
+	 * of interest to them (eg the SELinux *context= options).
+	 */
+	int err = security_sb_eat_lsm_opts((char *)data, &fc->security);
+	if (err)
+		return (err);
+
+	/*
+	 * Whatever is left we stash on in the fs_context so we can pass it
+	 * down to zfs_domount() or zfs_remount() later.
+	 */
+	fc->fs_private = data;
+	return (0);
+}
+
+static int
+zpl_get_tree(struct fs_context *fc)
+{
+	struct super_block *sb;
+	objset_t *os;
+	boolean_t issnap = B_FALSE;
+	int err;
+
+	err = dmu_objset_hold(fc->source, FTAG, &os);
+	if (err)
+		return (-err);
+
+	/*
+	 * The dsl pool lock must be released prior to calling sget().
+	 * It is possible sget() may block on the lock in grab_super()
+	 * while deactivate_super() holds that same lock and waits for
+	 * a txg sync.  If the dsl_pool lock is held over sget()
+	 * this can prevent the pool sync and cause a deadlock.
+	 */
+	dsl_dataset_long_hold(dmu_objset_ds(os), FTAG);
+	dsl_pool_rele(dmu_objset_pool(os), FTAG);
+
+	sb = sget(fc->fs_type, zpl_test_super, set_anon_super,
+	    fc->sb_flags, os);
+
+	/*
+	 * Recheck with the lock held to prevent mounting the wrong dataset
+	 * since z_os can be stale when the teardown lock is held.
+	 *
+	 * We can't do this in zpl_test_super in since it's under spinlock and
+	 * also s_umount lock is not held there so it would race with
+	 * zfs_umount and zfsvfs can be freed.
+	 */
+	if (!IS_ERR(sb) && sb->s_fs_info != NULL) {
+		zfsvfs_t *zfsvfs = sb->s_fs_info;
+		if (zpl_enter(zfsvfs, FTAG) == 0) {
+			if (os != zfsvfs->z_os)
+				err = SET_ERROR(EBUSY);
+			issnap = zfsvfs->z_issnap;
+			zpl_exit(zfsvfs, FTAG);
+		} else {
+			err = SET_ERROR(EBUSY);
+		}
+	}
+	dsl_dataset_long_rele(dmu_objset_ds(os), FTAG);
+	dsl_dataset_rele(dmu_objset_ds(os), FTAG);
+
+	if (IS_ERR(sb))
+		return (PTR_ERR(sb));
+
+	if (err) {
+		deactivate_locked_super(sb);
+		return (-err);
+	}
+
+	if (sb->s_root == NULL) {
+		zfs_mnt_t zm = {
+		    .mnt_osname = fc->source,
+		    .mnt_data = fc->fs_private,
+		};
+
+		fstrans_cookie_t cookie = spl_fstrans_mark();
+		err = zfs_domount(sb, &zm, fc->sb_flags & SB_SILENT ? 1 : 0);
+		spl_fstrans_unmark(cookie);
+
+		if (err) {
+			deactivate_locked_super(sb);
+			return (-err);
+		}
+
+		sb->s_flags |= SB_ACTIVE;
+	} else if (!issnap && ((fc->sb_flags ^ sb->s_flags) & SB_RDONLY)) {
+		/*
+		 * Skip ro check for snap since snap is always ro regardless
+		 * ro flag is passed by mount or not.
+		 */
+		deactivate_locked_super(sb);
+		return (-SET_ERROR(EBUSY));
+	}
+
+	struct dentry *root = dget(sb->s_root);
+	if (IS_ERR(root))
+		return (PTR_ERR(root));
+
+	fc->root = root;
+	return (0);
+}
+
+static int
+zpl_reconfigure(struct fs_context *fc)
+{
+	zfs_mnt_t zm = { .mnt_osname = NULL, .mnt_data = fc->fs_private };
+	fstrans_cookie_t cookie;
+	int error;
+
+	cookie = spl_fstrans_mark();
+	error = -zfs_remount(fc->root->d_sb, &fc->sb_flags, &zm);
+	spl_fstrans_unmark(cookie);
+	ASSERT3S(error, <=, 0);
+
+	return (error);
+}
+
+const struct fs_context_operations zpl_fs_context_operations = {
+	.parse_monolithic	= zpl_parse_monolithic,
+	.get_tree		= zpl_get_tree,
+	.reconfigure		= zpl_reconfigure,
+};
+
+static int
+zpl_init_fs_context(struct fs_context *fc)
+{
+	fc->ops = &zpl_fs_context_operations;
+	return (0);
+}
+
 const struct super_operations zpl_super_operations = {
 	.alloc_inode		= zpl_inode_alloc,
 #ifdef HAVE_SOPS_FREE_INODE
