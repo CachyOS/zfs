@@ -165,7 +165,10 @@ is_nametoolong(struct dentry *dentry)
 }
 
 static int
-#ifdef HAVE_IOPS_CREATE_USERNS
+#if defined(HAVE_IOPS_CREATE_NO_FLAG_ARG)
+zpl_create(struct mnt_idmap *user_ns, struct inode *dir,
+    struct dentry *dentry, umode_t mode)
+#elif defined(HAVE_IOPS_CREATE_USERNS)
 zpl_create(struct user_namespace *user_ns, struct inode *dir,
     struct dentry *dentry, umode_t mode, bool flag)
 #elif defined(HAVE_IOPS_CREATE_IDMAP)
@@ -180,7 +183,8 @@ zpl_create(struct inode *dir, struct dentry *dentry, umode_t mode, bool flag)
 	vattr_t *vap;
 	int error;
 	fstrans_cookie_t cookie;
-#if !(defined(HAVE_IOPS_CREATE_USERNS) || defined(HAVE_IOPS_CREATE_IDMAP))
+#if !(defined(HAVE_IOPS_CREATE_NO_FLAG_ARG) || \
+    defined(HAVE_IOPS_CREATE_USERNS) || defined(HAVE_IOPS_CREATE_IDMAP))
 	zidmap_t *user_ns = kcred->user_ns;
 #endif
 
